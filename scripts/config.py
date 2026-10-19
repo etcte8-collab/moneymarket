@@ -31,6 +31,7 @@ DEFAULTS = {
     "WEB_PORT": "9100",
     "ALLOW_TRIGGER": "true",
     "TRIGGER_TOKEN": "",
+    "DEAD_LINK_TTL_DAYS": "7",
     "PYTHON_BIN": sys.executable or "/usr/bin/python3",
 }
 

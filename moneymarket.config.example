@@ -35,6 +35,13 @@ WEB_PORT=9100
 ALLOW_TRIGGER=true
 TRIGGER_TOKEN=
 
+# ---- source-link gate -----------------------------------------------------
+# Every item URL is fetched before render (urllib, then curl as a second opinion);
+# a URL both agree is dead fails the run and is recorded in cache/dead_links.json.
+# Recorded URLs are not re-fetched for this many days, and the editor is told not to
+# cite them. Lower it to re-test known-dead links sooner; 0 re-checks every run.
+DEAD_LINK_TTL_DAYS=7
+
 # ---- interpreter ----------------------------------------------------------
 PYTHON_BIN=/usr/bin/python3
 

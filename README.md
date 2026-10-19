@@ -102,7 +102,7 @@ python3 scripts/generate.py --date 2026-10-18 --force
 python3 scripts/generate.py --skip-collect       # reuse cache, re-curate and re-render
 ```
 
-quotes -> collect -> **curation** -> render -> verify. Only the curation step needs
+quotes -> collect -> **curation** -> link gate -> render -> verify. Only the curation step needs
 judgement, so it is delegated to a headless `hermes -z` run with the `moneymarket-brief`
 skill preloaded (`-z` auto-bypasses approvals, which is what an unattended run needs).
 Everything around it stays deterministic Python: the renderer is invoked by the script, and
@@ -112,6 +112,30 @@ selection JSON, minimum size. A run that fails any check is reported failed and 
 previous report stays published. `logs/last_run.json` records every step with its status
 and duration; `logs/generate.log` is the human-readable trail; `logs/editorial-<date>.txt`
 keeps the headless run's output. A lock file stops overlapping runs.
+
+### The source-link gate
+
+Every item URL is fetched *before* anything is rendered, because the brief's premise is
+a source per number and the first headless run shipped 4 invented or truncated slugs out
+of 24. The ladder, and what each verdict costs:
+
+| Verdict | How | Effect |
+|---|---|---|
+| alive | urllib answers < 400 | nothing |
+| dead | urllib 404/410/451, then **curl re-checks** (HTTP/2, full browser headers) and also fails | run fails, nothing published, URL recorded in `cache/dead_links.json` |
+| alive (recovered) | urllib 404 but curl < 400 | trusted, logged as `urllib 404 but curl 200` |
+| bot-walled | 401/403/405/407/429 | advisory only, never blocks; not escalated (a second fetch buys nothing) |
+| unreachable | DNS/TLS/timeout | retried via curl, then advisory only |
+
+A recorded dead URL is not fetched again for `DEAD_LINK_TTL_DAYS` (default 7; set 0 to
+re-test every run), and it is injected into the editor's prompt as a list it must not
+cite. So the failure is self-correcting: the run fails, the next scheduled tick curates
+again, and the URL that just failed is off the table. A URL that comes back alive is
+dropped from the list automatically.
+
+Measured on the 2026-10-18 selection: 25.7s cold, 12.7s with the dead list warm and the
+probe timeout capped at 12s (the tail is `fred.stlouisfed.org`, which does not answer
+from this host at all).
 
 ### scripts/serve.py — browse reports from any host
 
@@ -235,6 +259,14 @@ moneymarket/
   are real; the URLs were written from feed metadata rather than from the address a browser
   landed on. They are not repaired because the instruction was to keep that report as
   published — `check_links` now stops any future run from shipping one.
+- 2026-10-18 — dead links are now retried, escalated and remembered. A 404 from urllib is
+  re-checked with curl before it counts (a false 404 would otherwise withhold a day's brief);
+  a URL both stacks agree is dead fails the run and is written to `cache/dead_links.json`,
+  where it stops being fetched for `DEAD_LINK_TTL_DAYS` and is handed to the editor as a
+  do-not-cite list — so the next scheduled tick retries with the bad URL off the table.
+  A URL that comes back alive is removed. Bot-walled is no longer escalated (advisory, so a
+  second fetch is pure latency) and the probe timeout dropped 25s -> 12s after measuring that
+  one silent host, `fred.stlouisfed.org`, set the floor: 25.7s -> 12.7s per gate.
 - 2026-10-18 — two scheduler bugs found by running it, both fixed:
   **a skip wrote no status**, so `next_due` stayed in the past and the scheduler spawned
   `generate.py` every 60 seconds (six cheap skip-runs before the fix landed; no LLM spend);

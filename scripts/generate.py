@@ -145,6 +145,9 @@ def collect_and_quotes(cfg: dict, hours: int) -> list[dict]:
 def editorial_prompt(cfg: dict, date: str, langs: list[str]) -> str:
     files = ", ".join(f"reports/data/{date}{'' if lang == 'en' else '-zh'}.json" for lang in langs)
     notes = f"\nAdditional instructions from the human:\n{cfg['EDITOR_NOTES']}\n" if cfg.get("EDITOR_NOTES") else ""
+    dead = sorted(load_dead())
+    dead_block = ("\nVerified dead on an earlier run — never cite these:\n"
+                  + "\n".join(f"  - {u}" for u in dead[:40]) + "\n") if dead else ""
     return f"""Generate the moneymarket brief for {date} in {', '.join(LANG_NAME[l] for l in langs)}.
 
 Work in {ROOT}. Follow the moneymarket-brief skill.
@@ -166,15 +169,20 @@ unattended run, do not stall or fail: write the brief from feed headlines, state
 plainly in sources_html that no article could be opened, and lower the confidence
 of anything that needed a body-text check.
 
+URLs are checked mechanically before the report is published, and a dead link fails the
+run — which means the whole day's brief is withheld. So:
+  - copy each item's url verbatim from the "link" field of cache/collect.json; never
+    retype, shorten, prettify or invent a slug, and never submit a URL you are unsure
+    is complete;
+  - if you opened the story in the browser at a different address, use exactly the
+    address the browser shows;
+  - before you finish, load every URL you are about to cite in the browser tool and
+    confirm it is not a "page not found" page. A 404 you could have caught costs the
+    run; a 404 you caught and replaced costs nothing.
+{dead_block}
 Verify your own output before finishing: each file parses as JSON, has all four lane
 ids, every item has title/summary/source/url/time/confidence, and confidence is one
 of confirmed/reported/single.
-
-URLs are checked mechanically before the report is published, and a 404 fails the run.
-So copy each item's url verbatim from the "link" field of cache/collect.json — never
-retype, shorten, prettify or invent a slug, and never submit a URL you are unsure is
-complete. If you opened the story in the browser at a different address, use exactly
-the address the browser shows.
 {notes}"""
 
 
@@ -322,9 +330,10 @@ DEAD = {404, 410, 451}
 WALLED = {401, 402, 403, 405, 407, 429}
 BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+DEAD_LIST = CACHE / "dead_links.json"
 
 
-def link_status(url: str, timeout: int = 25) -> tuple[str, int | str]:
+def link_status(url: str, timeout: int = 12) -> tuple[str, int | str]:
     """'ok' | 'dead' | 'walled' | 'unreachable' for one URL, via HEAD then GET."""
     import urllib.error
     import urllib.request
@@ -349,13 +358,69 @@ def link_status(url: str, timeout: int = 25) -> tuple[str, int | str]:
     return ("walled", last) if last in WALLED or last >= 400 else ("dead", last)
 
 
-def check_links(cfg: dict, date: str, langs: list[str]) -> dict:
-    """Gate publication on every item URL resolving. The brief's whole claim is that
-    each number carries a source, so an invented or truncated link is a worse defect
-    than a missing one — and an unattended editor does produce them: the first headless
-    run shipped 4 dead URLs out of 24, including a slug cut off mid-hyphen."""
-    from concurrent.futures import ThreadPoolExecutor
-    s = step("links")
+def curl_status(url: str, timeout: int = 12) -> int | None:
+    """Second opinion from a different HTTP stack. curl speaks HTTP/2 and sends a
+    complete browser header set, so it disagrees with urllib on servers that reject
+    urllib's fingerprint. None means curl could not reach the host either."""
+    r = run(["curl", "-s", "-o", "/dev/null", "-m", str(timeout), "-L", "-w", "%{http_code}",
+             "-A", BROWSER_UA,
+             "-H", "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+             "-H", "Accept-Language: en-US,en;q=0.9",
+             "-H", "Cache-Control: no-cache", url], timeout + 10)
+    code = r.stdout.strip()
+    return int(code) if r.returncode == 0 and code.isdigit() else None
+
+
+def probe(url: str) -> tuple[str, str]:
+    """'alive' | 'dead' | 'walled' | 'unreachable' for one URL.
+
+    Only a 'dead' verdict is escalated to a second HTTP stack before it counts, because
+    'dead' is the one that fails a run and costs a day's brief. 'walled' is advisory and
+    never blocks publication, so paying a second fetch for it would just slow every run
+    down on the dozen or so outlets that dislike robots.
+    """
+    kind, code = link_status(url)
+    if kind == "ok":
+        return "alive", f"urllib {code}"
+    if kind == "walled":
+        return "walled", f"urllib {code}"
+    if kind == "dead":
+        second = curl_status(url)
+        if second is not None and second < 400:
+            return "alive", f"urllib {code} but curl {second}; trusting curl"
+        if second is None:
+            return "dead", f"urllib {code}, curl unreachable"
+        return "dead", f"urllib {code}, curl {second}"
+    second = curl_status(url)  # unreachable: retry over a different stack
+    if second is None:
+        return "unreachable", f"urllib {code}, curl unreachable"
+    return ("alive", f"urllib {code} but curl {second}") if second < 400 else ("walled", f"curl {second}")
+
+
+def load_dead() -> dict:
+    try:
+        raw = json.loads(DEAD_LIST.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def save_dead(entries: dict) -> None:
+    tmp = DEAD_LIST.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=1, sort_keys=True), encoding="utf-8")
+    tmp.replace(DEAD_LIST)
+
+
+def dead_is_fresh(entry: dict, ttl_days: int) -> bool:
+    """A dead verdict expires: outlets reissue slugs, so a permanent ban would be wrong."""
+    try:
+        seen = datetime.fromisoformat(str(entry.get("last_seen", "")))
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - seen).days < ttl_days
+
+
+def selection_urls(date: str, langs: list[str]) -> dict[str, list[str]]:
     urls: dict[str, list[str]] = {}
     for lang in langs:
         data_path = ROOT / "reports" / "data" / f"{date}{'-zh' if lang == 'zh' else ''}.json"
@@ -370,18 +435,56 @@ def check_links(cfg: dict, date: str, langs: list[str]) -> dict:
                 url = str(item.get("url") or "").strip()
                 if url.startswith("http"):
                     urls.setdefault(url, []).append(f"{lang}:{lane.get('id')}")
+    return urls
+
+
+def check_links(cfg: dict, date: str, langs: list[str]) -> dict:
+    """Gate publication on every item URL resolving. The brief's whole claim is that
+    each number carries a source, so an invented or truncated link is a worse defect
+    than a missing one — and the first headless run shipped 4 dead URLs out of 24.
+
+    A URL confirmed dead by both HTTP stacks goes into cache/dead_links.json. Later runs
+    do not spend time re-fetching it, and the editor is told not to cite it. Failing the
+    run is itself the retry: the next scheduled tick curates again, this time steering
+    clear of the URLs that just failed.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    s = step("links")
+    urls = selection_urls(date, langs)
     if not urls:
         return s.finish(False, "no item URLs found in selection").as_dict()
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(link_status, urls))
-    dead = [u for u, (kind, _) in zip(urls, results) if kind == "dead"]
-    walled = sum(1 for kind, _ in results if kind == "walled")
-    lost = sum(1 for kind, _ in results if kind == "unreachable")
-    detail = (f"{len(urls)} urls: {len(urls) - len(dead) - walled - lost} ok, {len(dead)} dead, "
+    dead_list = load_dead()
+    ttl = cfgmod.get_int(cfg, "DEAD_LINK_TTL_DAYS", 7)
+    cached = [u for u in urls if u in dead_list and dead_is_fresh(dead_list[u], ttl)]
+    to_probe = [u for u in urls if u not in cached]
+
+    verdicts: dict[str, tuple[str, str]] = {}
+    if to_probe:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            verdicts = dict(zip(to_probe, pool.map(probe, to_probe)))
+        for url in to_probe:
+            kind, evidence = verdicts[url]
+            if kind == "dead":
+                entry = dead_list.get(url) or {"first_seen": now_utc().isoformat(timespec="seconds"),
+                                               "checks": 0}
+                entry.update(last_seen=now_utc().isoformat(timespec="seconds"),
+                             checks=int(entry.get("checks", 0)) + 1, evidence=evidence)
+                dead_list[url] = entry
+            elif kind == "alive" and url in dead_list:
+                dead_list.pop(url)  # it came back; stop treating it as dead
+        save_dead(dead_list)
+
+    dead = [u for u in urls if u in cached or verdicts.get(u, ("", ""))[0] == "dead"]
+    walled = sum(1 for kind, _ in verdicts.values() if kind == "walled")
+    lost = sum(1 for kind, _ in verdicts.values() if kind == "unreachable")
+    revived = len(urls) - len(dead) - walled - lost
+    detail = (f"{len(urls)} urls: {revived} ok, {len(dead)} dead "
+              f"({len(cached)} already on the dead list, {len(dead) - len(cached)} new), "
               f"{walled} bot-walled, {lost} unreachable")
-    if dead:
-        detail += " | DEAD: " + "; ".join(dead[:8])
+    fresh_dead = [u for u in dead if u not in cached]
+    if fresh_dead:
+        detail += " | NEWLY DEAD: " + "; ".join(fresh_dead[:8])
     return s.finish(not dead, detail).as_dict()
 
 
