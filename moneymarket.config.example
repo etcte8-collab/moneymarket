@@ -1,0 +1,47 @@
+# moneymarket.config — runtime settings for the generator and the web service.
+# KEY=VALUE, one per line. '#' starts a comment. Re-read on every scheduler tick,
+# so most changes take effect without restarting the service (see NOTES below).
+
+# ---- report cadence -------------------------------------------------------
+# Hours between generated reports. Fractional values are allowed (0.5 = 12h).
+REPORT_INTERVAL=24            # 24 hours
+# Generate immediately on start if today's report does not exist yet.
+RUN_IF_MISSING=true
+# Run the scheduler inside the web service process (set false to only serve).
+SCHEDULER=true
+
+# ---- what a run collects --------------------------------------------------
+LANGS=en,zh
+LANES=stock,money,tech,politics
+COLLECT_HOURS=48              # news window handed to collect.py
+
+# ---- editorial step -------------------------------------------------------
+# The curated selection JSON is written by a headless agent, because that step is
+# editorial judgement and collect.py must never write it.
+#   hermes  -> run: hermes -z "<prompt>" (one-shot, tools + skills loaded)
+#   none    -> skip curation and rendering; only refresh cache/quotes.json
+EDITOR=hermes
+HERMES_BIN=/home/huide/.local/bin/hermes
+EDITOR_TIMEOUT=2400           # seconds for the whole editorial run
+EDITOR_TOOLSETS=              # empty = hermes default toolsets
+# Extra instructions appended verbatim to the editorial prompt.
+EDITOR_NOTES=
+
+# ---- web service ----------------------------------------------------------
+WEB_HOST=0.0.0.0
+WEB_PORT=9100
+# POST /generate triggers a run. Allowed only when ALLOW_TRIGGER=true, and then
+# only with "Authorization: Bearer $TRIGGER_TOKEN" if a token is set.
+ALLOW_TRIGGER=true
+TRIGGER_TOKEN=
+
+# ---- interpreter ----------------------------------------------------------
+PYTHON_BIN=/usr/bin/python3
+
+# NOTES
+# - REPORT_INTERVAL, RUN_IF_MISSING, SCHEDULER, EDITOR_NOTES, TRIGGER_TOKEN and
+#   ALLOW_TRIGGER are hot-reloaded every tick. WEB_HOST/WEB_PORT/PYTHON_BIN need a
+#   service restart: systemctl --user restart moneymarket-web
+# - 0.0.0.0 exposes reports to every host that can route to this machine. Reports
+#   contain no secrets, but the trigger endpoint costs an LLM run — set
+#   TRIGGER_TOKEN, or firewall 9100, before leaving this on a shared network.

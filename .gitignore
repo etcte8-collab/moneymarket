@@ -1,0 +1,12 @@
+# Regenerated on every run: fetched feeds, quote pulls, HTTP access log, run status.
+cache/
+logs/
+
+# Local runtime settings. Copy moneymarket.config.example -> moneymarket.config.
+# Ignored on purpose: TRIGGER_TOKEN belongs here once you set one, and a committed
+# token is a token in every clone.
+moneymarket.config
+
+__pycache__/
+*.pyc
+.venv/

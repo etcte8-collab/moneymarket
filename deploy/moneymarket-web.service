@@ -1,0 +1,24 @@
+[Unit]
+Description=moneymarket report web service and scheduler
+Documentation=file://%h/proj.agent/moneymarket/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/proj.agent/moneymarket
+ExecStart=/usr/bin/python3 %h/proj.agent/moneymarket/scripts/serve.py
+Restart=always
+RestartSec=5
+# Config lives in moneymarket.config next to the scripts; nothing to override here.
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=America/Los_Angeles
+
+# Keep the process contained: it only needs to read the project and bind one port.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=%h/proj.agent/moneymarket %h/.hermes
+
+[Install]
+WantedBy=default.target
